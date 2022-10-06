@@ -1,104 +1,105 @@
-using System;
 using UnityEngine;
-using UnityEngine.Tilemaps;
 using Random = UnityEngine.Random;
 
-public class PlayerAnimator : MonoBehaviour {
-    [SerializeField] private float _minImpactForce = 20;
-    
-    // Anim times can be gathered from the state itself, but 
-    // for the simplicity of the video...
-    [SerializeField] private float _landAnimDuration = 0.1f;
-    [SerializeField] private float _attackAnimTime = 0.2f;
+namespace TarodevController {
+    /// <summary>
+    /// This is a pretty filthy script. I was just arbitrarily adding to it as I went.
+    /// You won't find any programming prowess here.
+    /// This is a supplementary script to help with effects and animation. Basically a juice factory.
+    /// </summary>
+    public class PlayerAnimator : MonoBehaviour {
+        [SerializeField] private Animator _anim;
+        [SerializeField] private AudioSource _source;
+        [SerializeField] private LayerMask _groundMask;
+        [SerializeField] private ParticleSystem _jumpParticles, _launchParticles;
+        [SerializeField] private ParticleSystem _moveParticles, _landParticles;
+        [SerializeField] private AudioClip[] _footsteps;
+        [SerializeField] private float _maxTilt = .1f;
+        [SerializeField] private float _tiltSpeed = 1;
+        [SerializeField, Range(1f, 3f)] private float _maxIdleSpeed = 2;
+        [SerializeField] private float _maxParticleFallSpeed = -40;
 
-    private IPlayerController _player;
-    private Animator _anim;
-    private SpriteRenderer _renderer;
-    
-    private bool _grounded;
-    private float _lockedTill;
-    private bool _jumpTriggered;
-    private bool _attacked;
-    private bool _landed;
+        private IPlayerController _player;
+        private bool _playerGrounded;
+        private ParticleSystem.MinMaxGradient _currentGradient;
+        private Vector2 _movement;
 
-    private void Awake() {
-        if (!TryGetComponent(out IPlayerController player)) {
-            Destroy(this);
-            return;
+        void Awake() => _player = GetComponentInParent<IPlayerController>();
+
+        void Update() {
+            if (_player == null) return;
+
+            // Flip the sprite
+            if (_player.Input.X != 0) transform.localScale = new Vector3(_player.Input.X > 0 ? 1 : -1, 1, 1);
+
+            // Lean while running
+            var targetRotVector = new Vector3(0, 0, Mathf.Lerp(-_maxTilt, _maxTilt, Mathf.InverseLerp(-1, 1, _player.Input.X)));
+            _anim.transform.rotation = Quaternion.RotateTowards(_anim.transform.rotation, Quaternion.Euler(targetRotVector), _tiltSpeed * Time.deltaTime);
+
+            // Speed up idle while running
+            _anim.SetFloat(IdleSpeedKey, Mathf.Lerp(1, _maxIdleSpeed, Mathf.Abs(_player.Input.X)));
+
+            // Splat
+            if (_player.LandingThisFrame) {
+                _anim.SetTrigger(GroundedKey);
+                _source.PlayOneShot(_footsteps[Random.Range(0, _footsteps.Length)]);
+            }
+
+            // Jump effects
+            if (_player.JumpingThisFrame) {
+                _anim.SetTrigger(JumpKey);
+                _anim.ResetTrigger(GroundedKey);
+
+                // Only play particles when grounded (avoid coyote)
+                if (_player.Grounded) {
+                    SetColor(_jumpParticles);
+                    SetColor(_launchParticles);
+                    _jumpParticles.Play();
+                }
+            }
+
+            // Play landing effects and begin ground movement effects
+            if (!_playerGrounded && _player.Grounded) {
+                _playerGrounded = true;
+                _moveParticles.Play();
+                _landParticles.transform.localScale = Vector3.one * Mathf.InverseLerp(0, _maxParticleFallSpeed, _movement.y);
+                SetColor(_landParticles);
+                _landParticles.Play();
+            }
+            else if (_playerGrounded && !_player.Grounded) {
+                _playerGrounded = false;
+                _moveParticles.Stop();
+            }
+
+            // Detect ground color
+            var groundHit = Physics2D.Raycast(transform.position, Vector3.down, 2, _groundMask);
+            if (groundHit && groundHit.transform.TryGetComponent(out SpriteRenderer r)) {
+                _currentGradient = new ParticleSystem.MinMaxGradient(r.color * 0.9f, r.color * 1.2f);
+                SetColor(_moveParticles);
+            }
+
+            _movement = _player.RawMovement; // Previous frame movement is more valuable
         }
 
-        _player = player;
-        _anim = GetComponent<Animator>();
-        _renderer = GetComponent<SpriteRenderer>();
-    }
-
-
-    private void Start() {
-        _player.Jumped += () => {
-            _jumpTriggered = true;
-        };
-        _player.Attacked += () => {
-            _attacked = true;
-        };
-        _player.GroundedChanged += (grounded, impactForce) => {
-            _grounded = grounded;
-            _landed = impactForce >= _minImpactForce;
-        };
-    }
-
-    private void Update() {
-        if (_player.Input.x != 0) _renderer.flipX = _player.Input.x < 0;
-
-        var state = GetState();
-
-        _jumpTriggered = false;
-        _landed = false;
-        _attacked = false;
-
-        if (state == _currentState) return;
-        _anim.CrossFade(state, 0, 0);
-        _currentState = state;
-    }
-
-    private int GetState() {
-        if (Time.time < _lockedTill) return _currentState;
-
-        // Priorities
-        if (_attacked) return LockState(Attack, _attackAnimTime);
-        if (_player.Crouching) return Crouch;
-        if (_landed) return LockState(Land, _landAnimDuration);
-        if (_jumpTriggered) return Jump;
-
-        if (_grounded) return _player.Input.x == 0 ? Idle : Walk;
-        return _player.Speed.y > 0 ? Jump : Fall;
-
-        int LockState(int s, float t) {
-            _lockedTill = Time.time + t;
-            return s;
+        private void OnDisable() {
+            _moveParticles.Stop();
         }
+
+        private void OnEnable() {
+            _moveParticles.Play();
+        }
+
+        void SetColor(ParticleSystem ps) {
+            var main = ps.main;
+            main.startColor = _currentGradient;
+        }
+
+        #region Animation Keys
+
+        private static readonly int GroundedKey = Animator.StringToHash("Grounded");
+        private static readonly int IdleSpeedKey = Animator.StringToHash("IdleSpeed");
+        private static readonly int JumpKey = Animator.StringToHash("Jump");
+
+        #endregion
     }
-
-    #region Cached Properties
-
-    private int _currentState;
-
-    private static readonly int Idle = Animator.StringToHash("Mum_idle");
-    private static readonly int Walk = Animator.StringToHash("Mum_walk");
-    private static readonly int Jump = Animator.StringToHash("Mum_jump");
-    private static readonly int Fall = Animator.StringToHash("Fall");
-    private static readonly int Land = Animator.StringToHash("MUm_land");
-    private static readonly int Attack = Animator.StringToHash("Mum_daga");
-    private static readonly int Crouch = Animator.StringToHash("Crouch");
-
-    #endregion
-}
-
-public interface IPlayerController {
-    public Vector2 Input { get; }
-    public Vector2 Speed { get; }
-    public bool Crouching { get; }
-
-    public event Action<bool, float> GroundedChanged; // Grounded - Impact force
-    public event Action Jumped;
-    public event Action Attacked;
 }
